@@ -1,0 +1,493 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Sidewalk Analyzer</title>
+
+    <!-- Leaflet CSS -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.css" />
+    <!-- Leaflet Draw CSS -->
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.css" />
+
+    <style>
+        body {
+            margin: 0;
+            padding: 20px;
+            font-family: Arial, sans-serif;
+        }
+
+        #map {
+            height: 500px;
+            width: 100%;
+            margin-bottom: 20px;
+            border: 2px solid #ccc;
+        }
+
+        #results {
+            background-color: #f5f5f5;
+            padding: 15px;
+            border-radius: 5px;
+            margin-top: 20px;
+        }
+
+        #loading {
+            display: none;
+            color: #007cba;
+            font-weight: bold;
+        }
+
+        .way-link {
+            display: block;
+            margin: 5px 0;
+            color: #007cba;
+            text-decoration: none;
+        }
+
+        .way-link:hover {
+            text-decoration: underline;
+        }
+
+        .instructions {
+            background-color: #e7f3ff;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+
+        .controls {
+            background-color: #f9f9f9;
+            padding: 15px;
+            border-radius: 5px;
+            margin-bottom: 20px;
+        }
+
+        .checkbox-group {
+            display: flex;
+            gap: 20px;
+            margin-top: 10px;
+        }
+
+        .checkbox-item {
+            display: flex;
+            align-items: center;
+            gap: 5px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 15px;
+        }
+
+        th,
+        td {
+            border: 1px solid #ddd;
+            padding: 8px;
+            text-align: left;
+        }
+
+        th {
+            background-color: #f2f2f2;
+            font-weight: bold;
+        }
+
+        tr:nth-child(even) {
+            background-color: #f9f9f9;
+        }
+
+        .way-link-table {
+            text-decoration: none;
+        }
+
+        .way-link-table:hover {
+            text-decoration: underline;
+        }
+
+        .legend {
+            margin: 10px 0;
+            padding: 10px;
+            background-color: #fff;
+            border-radius: 5px;
+            border: 1px solid #ddd;
+        }
+
+        .legend-item {
+            display: inline-block;
+            margin-right: 20px;
+        }
+
+        .color-indicator {
+            display: inline-block;
+            width: 20px;
+            height: 4px;
+            margin-right: 5px;
+            vertical-align: middle;
+        }
+    </style>
+</head>
+
+<body>
+    <h1>Sidewalk Analyzer</h1>
+
+    <div class="controls">
+        <strong>Filter Options:</strong>
+        <div class="checkbox-group">
+            <div class="checkbox-item">
+                <input type="checkbox" id="includeSidewalk" checked>
+                <label for="includeSidewalk">Include Sidewalks</label>
+            </div>
+            <div class="checkbox-item">
+                <input type="checkbox" id="includeCrossing" checked>
+                <label for="includeCrossing">Include Crossings</label>
+            </div>
+        </div>
+    </div>
+
+    <div class="instructions">
+        <strong>Instructions:</strong>
+        <ol>
+            <li>Set your filter preferences above</li>
+            <li>Use the rectangle tool in the top-left corner of the map to draw a bounding box</li>
+        </ol>
+    </div>
+
+    <div id="map"></div>
+
+    <div id="loading">Loading sidewalk data...</div>
+
+    <div id="results">
+        <h3>Results</h3>
+        <p>Draw a rectangle on the map to analyze sidewalks in that area.</p>
+    </div>
+
+    <!-- Leaflet JS -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+
+    <!-- Leaflet Draw JS -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet.draw/1.0.4/leaflet.draw.js"></script>
+
+    <script>
+        // Wait for all scripts to load
+        window.addEventListener('load', function () {
+            initializeMap();
+        });
+
+        function initializeMap() {
+            // Initialize the map
+            const map = L.map('map').setView([40.762, -73.815], 13);
+
+            // Add OpenStreetMap tiles
+            L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+                attribution: '© OpenStreetMap contributors'
+            }).addTo(map);
+
+            // Create a feature group to store drawn items
+            const drawnItems = new L.FeatureGroup();
+            map.addLayer(drawnItems);
+
+            // Create a feature group to store sidewalk results
+            const sidewalkLayer = new L.FeatureGroup();
+            map.addLayer(sidewalkLayer);
+
+            // Initialize the draw control and pass it the FeatureGroup of editable layers
+            const drawControl = new L.Control.Draw({
+                edit: {
+                    featureGroup: drawnItems
+                },
+                draw: {
+                    polygon: false,
+                    polyline: false,
+                    circle: false,
+                    marker: false,
+                    circlemarker: false,
+                    rectangle: {
+                        shapeOptions: {
+                            color: '#007cba',
+                            weight: 2
+                        }
+                    }
+                }
+            });
+            map.addControl(drawControl);
+
+            // Function to fetch sidewalks and nodes from Overpass API
+            async function fetchSidewalksAndNodes(bbox) {
+                const overpassUrl = "https://overpass-api.de/api/interpreter";
+
+                // Get checkbox values
+                const includeSidewalk = document.getElementById('includeSidewalk').checked;
+                const includeCrossing = document.getElementById('includeCrossing').checked;
+
+                // Build footway filter based on checkboxes
+                let footwayFilter = '';
+                if (includeSidewalk && includeCrossing) {
+                    footwayFilter = '"footway"~"sidewalk|crossing"';
+                } else if (includeSidewalk) {
+                    footwayFilter = '"footway"="sidewalk"';
+                } else if (includeCrossing) {
+                    footwayFilter = '"footway"="crossing"';
+                } else {
+                    // If neither is selected, return empty result
+                    return { elements: [] };
+                }
+
+                const overpassQuery = `
+                    [out:json];
+                    (
+                        way["highway"="footway"][${footwayFilter}](${bbox});
+                    );
+                    out body;
+                    >;
+                    out body;
+                `;
+
+                try {
+                    const response = await fetch(overpassUrl, {
+                        method: 'POST',
+                        headers: {
+                            'Content-Type': 'application/x-www-form-urlencoded',
+                        },
+                        body: `data=${encodeURIComponent(overpassQuery)}`
+                    });
+
+                    if (response.ok) {
+                        return await response.json();
+                    } else {
+                        console.error('Error fetching data from Overpass API:', response.status);
+                        return null;
+                    }
+                } catch (error) {
+                    console.error('Network error:', error);
+                    return null;
+                }
+            }
+
+            // Function to check if a way is self-enclosing
+            function isSelfEnclosing(nodes) {
+                if (!nodes || nodes.length < 3) {
+                    return false;
+                }
+
+                const firstNode = nodes[0];
+                const lastNode = nodes[nodes.length - 1];
+
+                return firstNode.lat === lastNode.lat && firstNode.lon === lastNode.lon;
+            }
+
+            // Function to process sidewalks data
+            async function processSidewalks(bbox) {
+                const data = await fetchSidewalksAndNodes(bbox);
+
+                if (!data) {
+                    return [];
+                }
+
+                const nodesDict = {};
+                const waysList = [];
+
+                // Process all elements from the response
+                for (const element of data.elements) {
+                    if (element.type === 'node') {
+                        nodesDict[element.id] = {
+                            lat: element.lat,
+                            lon: element.lon
+                        };
+                    } else if (element.type === 'way') {
+                        waysList.push(element);
+                    }
+                }
+
+                // Process ways and check if they're self-enclosing
+                const processedWays = [];
+
+                for (const way of waysList) {
+                    const nodeIds = way.nodes;
+                    const nodeDetails = [];
+
+                    for (const nodeId of nodeIds) {
+                        if (nodesDict[nodeId]) {
+                            nodeDetails.push(nodesDict[nodeId]);
+                        } else {
+                            console.warn(`Warning: Node ID ${nodeId} not found in fetched nodes`);
+                        }
+                    }
+
+                    const isClosed = isSelfEnclosing(nodeDetails);
+                    const footwayType = way.tags && way.tags.footway ? way.tags.footway : 'unknown';
+
+                    processedWays.push({
+                        id: way.id,
+                        nodes: nodeDetails,
+                        nodeCount: nodeDetails.length,
+                        footwayType: footwayType,
+                        isClosed: isClosed,
+                        tags: way.tags || {}
+                    });
+                }
+
+                return processedWays;
+            }
+
+            // Function to display results
+            function displayResults(processedWays) {
+                const resultsDiv = document.getElementById('results');
+
+                // Clear previous sidewalk layers
+                sidewalkLayer.clearLayers();
+
+                const closedWays = processedWays.filter(way => way.isClosed);
+
+                if (processedWays.length === 0) {
+                    resultsDiv.innerHTML = `
+                        <h3>Results</h3>
+                        <p>No sidewalk ways found in the selected area with current filter settings.</p>
+                    `;
+                    return;
+                }
+
+                // Add sidewalk ways to map layer
+                processedWays.filter(way => way.isClosed).forEach(way => {
+                    if (way.nodes.length >= 2) {
+                        const latLngs = way.nodes.map(node => [node.lat, node.lon]);
+                        const color = '#ff4444';
+                        const weight = 5;
+
+                        const polyline = L.polyline(latLngs, {
+                            color: color,
+                            weight: weight,
+                            opacity: 0.8
+                        }).addTo(sidewalkLayer);
+
+                        // Add click event to open OSM way page
+                        polyline.on('click', function () {
+                            window.open(`https://www.openstreetmap.org/way/${way.id}`, '_blank');
+                        });
+
+                        // Add tooltip
+                        const status = way.isClosed
+                        polyline.bindTooltip(`Way ${way.id}<br>Type: ${way.footwayType}<br>Nodes: ${way.nodeCount}`, {
+                            sticky: true
+                        });
+                    }
+                });
+
+                // Create results table
+                let html = `
+                    <h3>Results</h3>
+                    <p>Found ${processedWays.length} sidewalk ways (${closedWays.length} self-enclosing)</p>
+                    <table>
+                        <thead>
+                            <tr>
+                                <th>Way ID</th>
+                                <th>Footway Type</th>
+                                <th>Node Count</th>
+                                <th>Status</th>
+                                <th>Link</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                `;
+
+                // Sort ways: closed first, then by ID
+                const sortedWays = processedWays.sort((a, b) => {
+                    if (a.isClosed && !b.isClosed) return -1;
+                    if (!a.isClosed && b.isClosed) return 1;
+                    return a.id - b.id;
+                });
+
+                sortedWays.filter(way => way.isClosed).forEach(way => {
+                    const status = 'Self-enclosing';
+                    const statusColor = '#ff4444';
+
+                    html += `
+                        <tr>
+                            <td>${way.id}</td>
+                            <td>${way.footwayType}</td>
+                            <td>${way.nodeCount}</td>
+                            <td style="color: ${statusColor}; font-weight: bold;">${status}</td>
+                            <td><a href="https://www.openstreetmap.org/way/${way.id}" target="_blank" class="way-link-table">View on OSM</a></td>
+                        </tr>
+                    `;
+                });
+
+                html += `
+                        </tbody>
+                    </table>
+                `;
+
+                resultsDiv.innerHTML = html;
+            }
+
+            // Handle rectangle creation
+            map.on(L.Draw.Event.CREATED, async function (e) {
+                const layer = e.layer;
+
+                // Clear previous drawings
+                drawnItems.clearLayers();
+
+                // Add the new rectangle
+                drawnItems.addLayer(layer);
+
+                // Get the bounds of the rectangle
+                const bounds = layer.getBounds();
+                const bbox = `${bounds.getSouth()},${bounds.getWest()},${bounds.getNorth()},${bounds.getEast()}`;
+
+                // Show loading indicator
+                document.getElementById('loading').style.display = 'block';
+                document.getElementById('results').innerHTML = '<h3>Results</h3><p>Processing...</p>';
+
+                try {
+                    // Process the sidewalks
+                    const processedWays = await processSidewalks(bbox);
+
+                    // Display results
+                    displayResults(processedWays);
+
+                    console.log(`Found ${processedWays.length} sidewalk ways:`, processedWays);
+
+                } catch (error) {
+                    console.error('Error processing sidewalks:', error);
+                    document.getElementById('results').innerHTML = `
+                        <h3>Results</h3>
+                        <p style="color: red;">Error processing data. Please try again.</p>
+                    `;
+                } finally {
+                    // Hide loading indicator
+                    document.getElementById('loading').style.display = 'none';
+                }
+            });
+
+            // Handle rectangle editing
+            map.on(L.Draw.Event.EDITED, async function (e) {
+                const layers = e.layers;
+
+                layers.eachLayer(async function (layer) {
+                    if (layer instanceof L.Rectangle) {
+                        const bounds = layer.getBounds();
+                        const bbox = `${bounds.getSouth()},${bounds.getWest()},${bounds.getNorth()},${bounds.getEast()}`;
+
+                        document.getElementById('loading').style.display = 'block';
+                        document.getElementById('results').innerHTML = '<h3>Results</h3><p>Processing...</p>';
+
+                        try {
+                            const processedWays = await processSidewalks(bbox);
+                            displayResults(processedWays);
+                        } catch (error) {
+                            console.error('Error processing sidewalks:', error);
+                            document.getElementById('results').innerHTML = `
+                                <h3>Results</h3>
+                                <p style="color: red;">Error processing data. Please try again.</p>
+                            `;
+                        } finally {
+                            document.getElementById('loading').style.display = 'none';
+                        }
+                    }
+                });
+            });
+        } // End of initializeMap function
+    </script>
+</body>
+
+</html>
